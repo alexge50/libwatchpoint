@@ -71,7 +71,7 @@ extern "C" void watchpoint_free(void* addr)
     else ; // TODO: error handling
 }
 
-extern "C" void watch_point_set_callback(watchpoint_callback_t f)
+extern "C" void watchpoint_set_callback(watchpoint_callback_t f)
 {
     callback = f;
 }
@@ -225,8 +225,6 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
             0x48_b, 0xa1_b, reinterpret_cast<long long int>(stack_registers_state + 1), //movabs 0xcccccccccccccccc,%rax
             0x48_b, 0x89_b, 0xc5_b  //movabs %rax, %rbp
         );
-
-        int n_isolated_instruction = 0;
 
         isolated_instruction.append(
             0x55_b, // push %rbp

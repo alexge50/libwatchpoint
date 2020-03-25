@@ -3,7 +3,7 @@
 
 void callback(const void* addr, int size)
 {
-    printf("[0x%p] = ", addr);
+    printf("[%p] = ", addr);
     for(int i = 0; i < size; i++)
         printf("0x%hhx ", reinterpret_cast<const char*>(addr)[i]);
     printf("\n");
@@ -12,11 +12,11 @@ void callback(const void* addr, int size)
 int main()
 {
     watchpoint_intialize();
-    watch_point_set_callback(callback);
+    watchpoint_set_callback(callback);
 
     auto buffer = static_cast<long long*>(watchpoint_alloc(4096));
 
-    printf("Attempting to write to memory\n");
+    printf("Attempting to write to memory %p\n", buffer);
     buffer[0] = 1;
     printf("Written to memory\n");
 
