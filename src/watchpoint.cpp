@@ -14,6 +14,8 @@
 
 #include <Zydis/Zydis.h>
 #include "mapped_memory_areas.h"
+#include "instruction_buffer.h"
+#include "byte_literal.h"
 
 
 static ZydisDecoder decoder;
@@ -80,7 +82,6 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
 
     auto addr = signal_info->si_addr;
     auto pc = context->uc_mcontext.gregs[REG_RIP];
-    unsigned long long p = *reinterpret_cast<unsigned long long*>(pc);
 
     void* buffer = nullptr;
     std::size_t buffer_length = 0;
@@ -99,20 +100,16 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
         ZydisDecoderDecodeBuffer(&decoder, reinterpret_cast<unsigned long long*>(pc), 2 * sizeof(long long), &instruction)
     ))
     {
-        mprotect(buffer, buffer_length, PROT_READ | PROT_WRITE);
-
-        uint8_t* isolated_instruction = reinterpret_cast<uint8_t*>(mmap(nullptr, 512, PROT_EXEC | PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        thread_local ExecutableInstructionBuffer<512> isolated_instruction;
 
         long long stack_registers_state[2];
-        unsigned char save_stack[] = {
-            0x48, 0x89, 0xe0, // mov %rsp, %rax
-            0x48, 0xa3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // movabs %rax, 0xccc...
-            0x48, 0x89, 0xe8, // mov %rbp, %rax
-            0x48, 0xa3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // movabs %rax, 0xccc...
-        };
 
-        *reinterpret_cast<long long*>(save_stack + 5) = reinterpret_cast<long long int>(stack_registers_state);
-        *reinterpret_cast<long long*>(save_stack + 18) = reinterpret_cast<long long int>(stack_registers_state + 1);
+        auto save_stack = create_instruction_buffer(
+            0x48_b, 0x89_b, 0xe0_b, // mov %rsp, %rax
+            0x48_b, 0xa3_b, reinterpret_cast<long long int>(stack_registers_state), // movabs %rax, 0xccc...
+            0x48_b, 0x89_b, 0xe8_b, // mov %rbp, %rax
+            0x48_b, 0xa3_b, reinterpret_cast<long long int>(stack_registers_state + 1) // movabs %rax, 0xccc...
+        );
 
         ZydisRegister registers[10];
         int n_registers = 0;
@@ -140,8 +137,7 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
             }
         }
 
-        unsigned char restore_registers[512];
-        int n_restore_registers = 0;
+        InstructionBuffer<512> restore_registers;
 
         for(int i = 0; i < n_registers; i++)
         {
@@ -169,16 +165,13 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
                     0xbf,
                 };
 
-            restore_registers[n_restore_registers ++] = 0x48; // movabs $context->uc_mcontext.gregs[register], %rax
-            restore_registers[n_restore_registers ++] = bytecode_register_mapping[registers[i] - ZYDIS_REGISTER_RAX];
-            for(std::size_t j = 0; j < 8; j++)
-                restore_registers[n_restore_registers ++] = reinterpret_cast<uint8_t*>(
-                    context->uc_mcontext.gregs + register_mapping[registers[i] - ZYDIS_REGISTER_RAX]
-                )[j];
+            restore_registers += create_instruction_buffer( // movabs $context->uc_mcontext.gregs[register], %rax
+                0x48_b, bytecode_register_mapping[registers[i] - ZYDIS_REGISTER_RAX],
+                context->uc_mcontext.gregs[register_mapping[registers[i] - ZYDIS_REGISTER_RAX]]
+            );
         }
 
-        unsigned char save_registers[512];
-        int n_save_registers = 0;
+        InstructionBuffer<512> save_registers;
 
         if(auto i = std::find(
                 registers,
@@ -187,11 +180,9 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
         {// save rax
             std::swap(*i, registers[0]);
 
-            save_registers[n_save_registers++] = 0x48; // movabs %rax, 0xccc...
-            save_registers[n_save_registers++] = 0xa3;
-            *reinterpret_cast<long long*>(save_registers + n_save_registers) =
-                reinterpret_cast<long long int>(context->uc_mcontext.gregs + REG_RAX);
-            n_save_registers += 8;
+            save_registers += create_instruction_buffer( // movabs %rax, 0xccc...
+                0x48_b, 0xa3_b, reinterpret_cast<long long int>(context->uc_mcontext.gregs + REG_RAX)
+            );
         }
 
         for(int i = 1; i < n_registers; i++)
@@ -220,81 +211,47 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
                     0xf8,
                 };
 
-            save_registers[n_save_registers++] = 0x48; //mov %reg, %rax
-            save_registers[n_save_registers++] = 0x89;
-            save_registers[n_save_registers++] = registers[i] - ZYDIS_REGISTER_RAX;
-
-            save_registers[n_save_registers++] = 0x48; // movabs %rax, 0xccc...
-            save_registers[n_save_registers++] = 0xa3;
-            *reinterpret_cast<long long*>(save_registers + n_save_registers) =
-                reinterpret_cast<long long int>(context->uc_mcontext.gregs + REG_RAX);
-            n_save_registers += 8;
+            save_registers += create_instruction_buffer(
+                //mov %reg, %rax
+                0x48_b, 0x89_b, static_cast<unsigned char>(registers[i] - ZYDIS_REGISTER_RAX),
+                // movabs %rax, 0xccc...
+                0x48_b, 0xa3_b, reinterpret_cast<long long int>(context->uc_mcontext.gregs + REG_RAX)
+            );
         }
 
-        uint8_t restore_stack[] ={
-            0x48, 0xa1, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //movabs 0xcccccccccccccccc,%rax
-            0x48, 0x89, 0xc4, //movabs %rax, %rsp
-            0x48, 0xa1, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //movabs 0xcccccccccccccccc,%rax
-            0x48, 0x89, 0xc5, //movabs %rax, %rbp
-        };
-
-        *reinterpret_cast<long long*>(restore_stack + 2) = reinterpret_cast<long long int>(stack_registers_state);
-        *reinterpret_cast<long long*>(restore_stack + 15) = reinterpret_cast<long long int>(stack_registers_state + 1);
+        auto restore_stack = create_instruction_buffer(
+            0x48_b, 0xa1_b, reinterpret_cast<long long int>(stack_registers_state), //movabs 0xcccccccccccccccc,%rax
+            0x48_b, 0x89_b, 0xc4_b, //movabs %rax, %rsp
+            0x48_b, 0xa1_b, reinterpret_cast<long long int>(stack_registers_state + 1), //movabs 0xcccccccccccccccc,%rax
+            0x48_b, 0x89_b, 0xc5_b  //movabs %rax, %rbp
+        );
 
         int n_isolated_instruction = 0;
 
-        isolated_instruction[n_isolated_instruction ++] = 0x55; // push %rbp
-        isolated_instruction[n_isolated_instruction ++] = 0x48; // mov %rsp, %rbp
-        isolated_instruction[n_isolated_instruction ++] = 0x89;
-        isolated_instruction[n_isolated_instruction ++] = 0xe5;
-
-        std::copy(
-            std::begin(save_stack),
-            std::end(save_stack),
-            isolated_instruction + n_isolated_instruction
+        isolated_instruction.append(
+            0x55_b, // push %rbp
+            0x48_b, 0x89_b, 0xe5_b // mov %rsp, %rbp
         );
 
-        n_isolated_instruction += std::size(save_stack);
+        isolated_instruction += save_stack;
+        isolated_instruction += restore_registers;
 
-        std::copy(
-            restore_registers,
-            restore_registers + n_restore_registers,
-            isolated_instruction + n_isolated_instruction
+        isolated_instruction.append_raw_buffer(reinterpret_cast<std::byte*>(pc), instruction.length);
+
+        isolated_instruction += save_registers;
+        isolated_instruction += restore_stack;
+        isolated_instruction.append(
+            0xc9_b,// leaveq
+            0xc3_b //retq
         );
 
-        n_isolated_instruction += n_restore_registers;
-
-        std::copy(
-            reinterpret_cast<uint8_t*>(pc),
-            reinterpret_cast<uint8_t*>(pc) + instruction.length,
-            isolated_instruction + n_isolated_instruction
-        );
-
-        n_isolated_instruction += instruction.length;
-
-        std::copy(
-            save_registers,
-            save_registers + n_save_registers,
-            isolated_instruction + n_isolated_instruction
-        );
-        n_isolated_instruction += n_save_registers;
-
-        std::copy(
-            std::begin(restore_stack),
-            std::end(restore_stack),
-            isolated_instruction + n_isolated_instruction
-        );
-        n_isolated_instruction += std::size(restore_stack);
-
-        isolated_instruction[n_isolated_instruction ++] = 0xc9; // leaveq
-        isolated_instruction[n_isolated_instruction ++] = 0xc3; // retq
+        mprotect(buffer, buffer_length, PROT_READ | PROT_WRITE);
 
         using f = void(*)();
-        reinterpret_cast<f>(isolated_instruction)();
+        reinterpret_cast<f>(isolated_instruction.begin())();
 
         callback(addr, size / 8);
 
-        munmap(isolated_instruction, 512);
         mprotect(buffer, buffer_length, PROT_NONE);
         context->uc_mcontext.gregs[REG_RIP] += instruction.length;
     }
