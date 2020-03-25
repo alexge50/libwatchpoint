@@ -1,6 +1,7 @@
 //
 // Created by alex on 3/21/20.
 //
+#include "watchpoint.h"
 
 #include <csignal>
 #include <cassert>
@@ -17,6 +18,7 @@
 
 static ZydisDecoder decoder;
 static MappedMemoryAreas mapped_memory_areas;
+static watchpoint_callback_t callback;
 
 static void handler(int signal, siginfo_t* signal_info, void* pcontext);
 
@@ -65,6 +67,11 @@ extern "C" void watchpoint_free(void* addr)
         munmap(addr, length);
     }
     else ; // TODO: error handling
+}
+
+extern "C" void watch_point_set_callback(watchpoint_callback_t f)
+{
+    callback = f;
 }
 
 void handler(int signal, siginfo_t* signal_info, void* pcontext)
@@ -285,7 +292,7 @@ void handler(int signal, siginfo_t* signal_info, void* pcontext)
         using f = void(*)();
         reinterpret_cast<f>(isolated_instruction)();
 
-        // TODO: callback
+        callback(addr, size / 8);
 
         munmap(isolated_instruction, 512);
         mprotect(buffer, buffer_length, PROT_NONE);
