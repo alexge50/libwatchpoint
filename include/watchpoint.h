@@ -5,6 +5,8 @@
 #ifndef LIBWATCHPOINT_WATCHPOINT_H
 #define LIBWATCHPOINT_WATCHPOINT_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -12,7 +14,7 @@ extern "C"
 
 typedef void(*watchpoint_callback_t)(const void*, int);
 
-void watchpoint_intialize();
+void watchpoint_intialize(void);
 void* watchpoint_alloc(size_t size);
 void watchpoint_free(void* addr);
 void watch_point_set_callback(watchpoint_callback_t);
